@@ -1,0 +1,13 @@
+,images,labels
+0,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/images/Case64.nii.gz,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/masks/Case64_Segmentation.nii.gz
+1,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/images/Case11.nii.gz,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/masks/Case11_Segmentation.nii.gz
+2,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/images/Case46.nii.gz,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/masks/Case46_Segmentation.nii.gz
+3,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/images/Case36.nii.gz,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/masks/Case36_Segmentation.nii.gz
+4,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/images/Case24.nii.gz,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/masks/Case24_Segmentation.nii.gz
+5,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/images/Case68.nii.gz,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/masks/Case68_Segmentation.nii.gz
+6,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/images/Case52.nii.gz,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/masks/Case52_Segmentation.nii.gz
+7,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/images/Case14.nii.gz,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/masks/Case14_Segmentation.nii.gz
+8,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/images/Case15.nii.gz,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/masks/Case15_Segmentation.nii.gz
+9,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/images/Case42.nii.gz,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/masks/Case42_Segmentation.nii.gz
+10,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/images/Case29.nii.gz,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/masks/Case29_Segmentation.nii.gz
+11,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/images/Case03.nii.gz,/home/infres/rodriguez-24/VQRobustSegmentation/data/Prostate/masks/Case03_Segmentation.nii.gz

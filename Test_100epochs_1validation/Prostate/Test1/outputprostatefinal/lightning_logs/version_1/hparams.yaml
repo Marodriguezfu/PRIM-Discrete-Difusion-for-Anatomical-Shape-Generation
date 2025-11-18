@@ -1,0 +1,12 @@
+channels: 16
+check_val: 1
+dropout: 0.0
+embed_dim: 256
+inputchannels: 1
+max_epochs: 100
+n_embed: 1024
+num_classes: 3
+output_root: /home/infres/rodriguez-24/VQRS_initial/data/Prostate/Test1/outputprostatefinal/test_best_dice
+w_asd: 0.1
+w_d: 0.8
+w_hd: 0.1

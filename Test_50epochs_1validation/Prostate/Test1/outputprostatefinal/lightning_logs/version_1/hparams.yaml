@@ -1,0 +1,17 @@
+batch_size: 1
+channels: 16
+check_val: 1
+csv_test_img: /home/infres/rodriguez-24/VQRS_initial/data/Prostate/test.csv
+csv_train_img: /home/infres/rodriguez-24/VQRS_initial/data/Prostate/train.csv
+csv_val_img: /home/infres/rodriguez-24/VQRS_initial/data/Prostate/validation.csv
+dropout: 0.0
+embed_dim: 256
+inputchannels: 1
+max_epochs: 50
+n_embed: 1024
+num_classes: 3
+num_workers: 4
+output_root: /home/infres/rodriguez-24/VQRS_initial/data/Prostate/Test1/outputprostatefinal
+w_asd: 0
+w_d: 1
+w_hd: 0
