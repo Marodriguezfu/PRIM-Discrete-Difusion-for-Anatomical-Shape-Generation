@@ -218,6 +218,28 @@ These files contain metric histories (e.g., Dice, loss, HD, multi-metric score).
 
 The script `Logs_to_eps_png.py` allows you to generate **EPS** and **PNG** plots directly from these JSON logs.
 
+## 📁 Previous Training Experiments
+
+The repository includes the folders:
+
+- `Test_50epochs_1validation`
+- `Test_100epochs_1validation`
+- `Test_100epochs_5validation`
+
+These directories correspond to **previous training experiments** performed before the current setup:
+
+- **`Test_50epochs_1validation`**: Training run with **50 epochs** and **validation executed every epoch**.
+
+- **`Test_100epochs_1validation`**: Training run with **100 epochs** and **validation executed every epoch**.
+
+- **`Test_100epochs_5validation`**: Training run with **100 epochs** but **validation executed every 5 epochs**.
+
+Each folder contains the associated logs, model checkpoints, and evaluation outputs for those experiments.  
+
+These results are kept for comparison and reproducibility across different training setups.
+
+
+
 # 🧑‍💻 Full Execution Workflow
 
 ```
