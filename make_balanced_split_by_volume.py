@@ -234,17 +234,6 @@ def balanced_group_split(df_stats, train_ratio=0.70, val_ratio=0.15, test_ratio=
 def main():
     ap = argparse.ArgumentParser(description="Create balanced splits by TZ/PZ volume.")
     ap.add_argument(
-        "--csv",
-        nargs="+",
-        required=True,
-        help="One or several CSVs (e.g., train.csv validation.csv test.csv or a master file).",
-    )
-    ap.add_argument(
-        "--out_dir",
-        default=".",
-        help="Output folder for mask_volumes.csv and new CSVs.",
-    )
-    ap.add_argument(
         "--tz_label", type=int, default=1, help="TZ label in the mask (default=1)."
     )
     ap.add_argument(
@@ -256,9 +245,12 @@ def main():
     ap.add_argument("--random_state", type=int, default=42)
     args = ap.parse_args()
 
-    os.makedirs(args.out_dir, exist_ok=True)
+    csv_paths = ["./data/Prostate/all_cases.csv"]
+    out_dir = "."
 
-    df = read_inputs(args.csv)
+    os.makedirs(out_dir, exist_ok=True)
+
+    df = read_inputs(csv_paths)
     # Compute per-row stats
     rows = []
     for i, r in df.iterrows():
@@ -291,7 +283,7 @@ def main():
         raise RuntimeError("No rows were generated. Are paths/formats correct?")
 
     stats = pd.DataFrame(rows)
-    stats.to_csv(os.path.join(args.out_dir, "mask_volumes.csv"), index=False)
+    stats.to_csv(os.path.join(out_dir, "mask_volumes.csv"), index=False)
 
     # Balanced split by TZ/PZ volume bins and grouped by patient
     train_p, val_p, test_p = balanced_group_split(
@@ -308,18 +300,17 @@ def main():
     test_df  = stats[stats["patient_id"].isin(test_p)][["images", "labels"]].drop_duplicates().reset_index(drop=True)
 
     # Save with index so that the first column is the row number (unnamed)
-    train_csv = os.path.join(args.out_dir, "train.csv")
-    val_csv   = os.path.join(args.out_dir, "validation.csv")
-    test_csv  = os.path.join(args.out_dir, "test.csv")
+    train_csv = os.path.join(out_dir, "train.csv")
+    val_csv   = os.path.join(out_dir, "validation.csv")
+    test_csv  = os.path.join(out_dir, "test.csv")
 
     train_df.to_csv(train_csv, index=True)
     val_df.to_csv(val_csv, index=True)
     test_df.to_csv(test_csv, index=True)
 
-
     # Summary
-    print(">>> Saved volume report to:", os.path.join(args.out_dir, "mask_volumes.csv"))
-    print(f">>> Split created in {args.out_dir}/")
+    print(">>> Saved volume report to:", os.path.join(out_dir, "mask_volumes.csv"))
+    print(f">>> Split created in {out_dir}/")
     print(f"    train.csv: {len(train_df)} rows, patients: {len(train_p)}")
     print(f"    validation.csv: {len(val_df)} rows, patients: {len(val_p)}")
     print(f"    test.csv: {len(test_df)} rows, patients: {len(test_p)}")
