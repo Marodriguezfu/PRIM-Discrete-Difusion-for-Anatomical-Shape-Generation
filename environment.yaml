@@ -2,30 +2,40 @@ name: vqrs_env
 channels:
   - pytorch
   - defaults
+  - conda-forge
 dependencies:
   - python=3.7.2
-  - pip=20.3
   - cudatoolkit=10.2
   - pytorch=1.7.1
   - torchvision=0.8.2
   - numpy=1.19.2
+  - scipy=1.6.0
+  - scikit-image=0.18.1
+  - scikit-learn=0.24.0
+  - pandas=1.2.0
+  - pillow
+  - matplotlib
+  - seaborn=0.11.1
+  - h5py
+  - nibabel
+  - protobuf=3.19.6
+  - tensorboard=2.9.1
+  - pip
   - pip:
-    - einops
-    - kornia>=0.5.4
-    - tqdm
-    - lpips
-    - pillow
-    - pytorch-fid
-    - albumentations
-    - contrastive_learner>=0.1.0
-    - vector-quantize-pytorch==0.1.0
-    - jupyter==1.0.0
-    - numpy==1.19.4
-    - pandas==1.2.0
-    - pyro-ppl==1.5.1
-    - pytorch-lightning==1.1.2
-    - scikit-image==0.18.1
-    - scikit-learn==0.24.0
-    - scipy==1.6.0
-    - seaborn==0.11.1
-    - tensorboard==2.4.0
+      - pytorch-lightning==1.5.10
+      - einops
+      - kornia>=0.5.4
+      - tqdm
+      - lpips
+      - pytorch-fid
+      - albumentations
+      - contrastive_learner>=0.1.0
+      - vector-quantize-pytorch==0.1.0
+      - pyro-ppl==1.5.1
+      - tensorboardX
+      - jupyter==1.0.0
+      - transformers==4.30.2
+      - tokenizers==0.13.3
+      - huggingface-hub==0.16.4
+      - safetensors==0.3.3
+      - monai==0.8.1
