@@ -1,0 +1,39 @@
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# === Virtual environments ===
+env/
+venv/
+.venv/
+*.egg-info/
+
+# === Checkpoints and model weights ===
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# === Training outputs ===
+lightning_logs/
+logs/
+runs/
+tensorboard/
+wandb/
+mlruns/
+
+# === Intermediate results ===
+temp/
+tmp/
+*.tmp
+*.log
+
+# === System files ===
+.DS_Store
+Thumbs.db
+
+# === VSCode ===
+.vscode/
