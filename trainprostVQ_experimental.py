@@ -485,7 +485,7 @@ if __name__ == '__main__':
             inputchannels=1,
             num_classes=3,
             channels=16,
-            dropout=0.2,
+            dropout=0,
             n_embed=1024,
             embed_dim=256,
             w_d = 0.8,
