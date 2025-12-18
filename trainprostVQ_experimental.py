@@ -487,7 +487,7 @@ if __name__ == '__main__':
             channels=16,
             dropout=0,
             n_embed=1024,
-            embed_dim=256,
+            embed_dim=64,
             w_d = 0.8,
             w_hd = 0.1,
             w_asd = 0.1,
@@ -528,7 +528,7 @@ if __name__ == '__main__':
         )
         # initialise Lightning's trainer.
         trainer = pytorch_lightning.Trainer(
-            gpus=[0],
+            gpus=[3],
             max_epochs=net.max_epochs,
             check_val_every_n_epoch=net.check_val,
             #callbacks=[checkpoint_dice, checkpoint_multi, early_stopping],

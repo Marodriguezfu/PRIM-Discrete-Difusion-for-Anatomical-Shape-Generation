@@ -1,7 +1,8 @@
 ID,Objective,Modified Parameters,Recommended Values,Expected Impact,Results
 E1,Increase model capacity,channels,"16→24, 32, 64","Higher Dice; higher GPU memory usage", Only worked with 24
-E2,Add regularization to reduce overfitting,dropout,"0.0→0.1, 0.2","More robustness; possibly lower initial Dice", dropout=0.1
-E3,Explore smaller VQ embedding,n_embed; embed_dim,"1024→512, 256→128","More aggressive quantization; more compact latent space",
+E2,Add regularization to reduce overfitting,dropout,"0.0→0.1, 0.2","More robustness; possibly lower initial Dice", dropout=0.1 and 0.2
+E3,Explore smaller VQ embedding,n_embed,"1024→256, 512 2048","More aggressive quantization; more compact latent space", n_embed = 256 512 2048
+E3,Explore smaller VQ embedding,embed_dim,"256→64, 128","More aggressive quantization; more compact latent space", embed_dim = 128
 E4,Increase VQ codebook size,n_embed,"1024→2048","Better reconstructions; increased memory usage",
 E5,Emphasize geometric boundary metrics,w_hd; w_asd,"(0.1,0.1)→(0.2,0.2)","Better HD/ASD; improved boundary sharpness",
 E6,Validate more frequently,check_val,"5→1","More precise curves; slower training",
