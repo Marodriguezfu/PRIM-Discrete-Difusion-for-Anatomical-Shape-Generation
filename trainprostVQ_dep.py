@@ -5,16 +5,12 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 import pandas as pd
 import numpy as np
-import torch
 import glob
-import torchvision
-import torchvision.transforms as T
-from torchvision import models
+import pytorch_lightning
 import pytorch_lightning as pl
-from transformers import ViTForImageClassification
-from monai.losses import DiceCELoss
-from monai.inferers import sliding_window_inference
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 import nibabel as nib
+from monai.losses import DiceCELoss
 from monai.transforms import (
     AsDiscrete,
     AddChanneld,
@@ -39,58 +35,13 @@ from monai.transforms import (
     RandBiasFieldd,
 
 )
-
-from monai.config import print_config
 from monai.metrics import DiceMetric, compute_hausdorff_distance, compute_average_surface_distance,  compute_meandice
-from monai.networks.nets import UNETR
+from monai.data import decollate_batch
 
-from monai.data import (
-    DataLoader,
-    CacheDataset,
-    load_decathlon_datalist,
-    decollate_batch,
-    list_data_collate,
-)
-from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.callbacks import ModelCheckpoint
-from skimage.io import imread
-from skimage.io import imsave
 from tqdm import tqdm
 from argparse import ArgumentParser
-# Press ⌃R to execute it or replace it with your code.
-# Press Double ⇧ to search everywhere for classes, files, tool windows, actions, and settings.
-from transformers.optimization import AdamW
-from transformers import ViTForImageClassification, BeitFeatureExtractor, BeitForImageClassification, BeitForMaskedImageModeling, BeitModel
-import os
-import torch
-import torch.nn as nn
-from torch.utils.data.distributed import DistributedSampler
-from torch.nn.parallel import DistributedDataParallel as DataParallel
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
-import pandas as pd
-import numpy as np
-import torch
-import torchvision
-from convnet3D_utils_dep import  UNet3Dv2,  VQUNet3Dposv3, GumbelUNet3Dpos
-import torchvision.transforms as T
-from transformers.optimization import get_cosine_schedule_with_warmup
-from einops import rearrange
-from pytorch_lightning.callbacks import LearningRateMonitor
-from functools import partial
 
-from torchvision import models
-import pytorch_lightning as pl
-import pytorch_lightning
-
-from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
-from skimage.io import imread
-from skimage.io import imsave
-from tqdm import tqdm
-import math
-from argparse import ArgumentParser
-
+from convnet3D_utils_dep import  VQUNet3Dposv3
 
 image_size = (224, 224)
 num_classes = 14
@@ -197,9 +148,8 @@ class ProstateDataset(Dataset):
             sample = self.train_transforms(sample)
         else:
             sample = self.val_transforms(sample)
-
+        
         return sample
-
 
 class ProstateDataModule(pl.LightningDataModule):
     def __init__(self, csv_train_img, csv_val_img, csv_test_img, batch_size, num_workers):
@@ -293,10 +243,10 @@ class Net(pl.LightningModule):
         quant, loss, latents = self._model(input)
         return quant
 
-    def get_input(self, batch, k):
-        x = batch[k]
-        x = x.to(memory_format=torch.contiguous_format)
-        return x.float()
+    #def get_input(self, batch, k):
+    #    x = batch[k]
+    #    x = x.to(memory_format=torch.contiguous_format)
+    #    return x.float()
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
@@ -485,14 +435,14 @@ if __name__ == '__main__':
             inputchannels=1,
             num_classes=3,
             channels=16,
-            dropout=0,
+            dropout=0.0,
             n_embed=1024,
-            embed_dim=64,
+            embed_dim=256,
             w_d = 0.8,
             w_hd = 0.1,
             w_asd = 0.1,
-            max_epochs=100,
-            check_val=5,
+            max_epochs=2,
+            check_val=1,
             output_root=root_dir,
         )
         data = ProstateDataModule(
@@ -528,7 +478,7 @@ if __name__ == '__main__':
         )
         # initialise Lightning's trainer.
         trainer = pytorch_lightning.Trainer(
-            gpus=[3],
+            gpus=[0],
             max_epochs=net.max_epochs,
             check_val_every_n_epoch=net.check_val,
             #callbacks=[checkpoint_dice, checkpoint_multi, early_stopping],

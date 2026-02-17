@@ -3,10 +3,6 @@ import torch.nn as nn
 from einops import rearrange
 import numpy as np
 from torch import einsum
-try:
-    import torch.distributed as dist
-except Exception:
-    dist = None
 
 def nonlinearity(x):
     # swish
@@ -33,9 +29,6 @@ class VectorQuantizer2(nn.Module):
         self.legacy = legacy
 
         self.embedding = nn.Embedding(self.n_e, self.e_dim)
-        self.register_buffer("usage_ema", torch.zeros(self.n_e))
-        self.usage_decay = 0.99
-        self.dead_code_threshold = 1.0
         self.embedding.weight.data.uniform_(-1.0 / self.n_e, 1.0 / self.n_e)
 
         self.remap = remap
@@ -91,21 +84,6 @@ class VectorQuantizer2(nn.Module):
             torch.einsum('bd,dn->bn', z_flattened, rearrange(self.embedding.weight, 'n d -> d n'))
 
         min_encoding_indices = torch.argmin(d, dim=1)
-        if self.training:
-            counts = torch.bincount(min_encoding_indices, minlength=self.n_e).float()
-
-            if dist is not None and dist.is_available() and dist.is_initialized():
-                dist.all_reduce(counts)
-
-            self.usage_ema.mul_(self.usage_decay).add_(counts * (1.0 - self.usage_decay))
-
-            dead = self.usage_ema < self.dead_code_threshold
-            if dead.any():
-                n_dead = int(dead.sum().item())
-                rand_idx = torch.randint(0, z_flattened.shape[0], (n_dead,), device=z_flattened.device)
-                self.embedding.weight.data[dead] = z_flattened[rand_idx]
-                self.usage_ema[dead] = self.dead_code_threshold
-
         z_q = self.embedding(min_encoding_indices).view(z.shape)
         perplexity = None
         min_encodings = None
@@ -310,26 +288,26 @@ class VQdec(nn.Module):
         self.post_quant_conv = torch.nn.Conv3d(embed_dim, channels*16, 1)
         self.conv52 = ResnetBlock(in_channels=channels*16, out_channels=channels*16,dropout=dropout)
         self.up4 = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
-        self.conv42 = ResnetBlock(in_channels=channels*16, out_channels=channels*8, dropout=dropout)
+        self.conv42 = ResnetBlock(in_channels=channels*24, out_channels=channels*8, dropout=dropout)
         self.up3 = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
-        self.conv32 = ResnetBlock(in_channels=channels*8, out_channels=channels*4, dropout=dropout)
+        self.conv32 = ResnetBlock(in_channels=channels*12, out_channels=channels*4, dropout=dropout)
         self.up2 = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
-        self.conv22 = ResnetBlock(in_channels=channels*4, out_channels=channels*2, dropout=dropout)
+        self.conv22 = ResnetBlock(in_channels=channels*6, out_channels=channels*2, dropout=dropout)
         self.up1 = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
-        self.conv13 = ResnetBlock(in_channels=channels*2, out_channels=channels, dropout=dropout)
+        self.conv13 = ResnetBlock(in_channels=channels*3, out_channels=channels, dropout=dropout)
         self.conv14 = nn.Conv3d(channels, num_classes, kernel_size=1, padding=0, bias=use_bias)
 
-    def forward(self, quant):
+    def forward(self, quant, x1, x2, x3, x4):
 
         x5 = self.post_quant_conv(quant)
         x5 = self.conv52(x5)
-        x4 = self.up4(x5)
+        x4 = torch.cat([self.up4(x5), x4], dim=1)
         x4 = self.conv42(x4)
-        x3 = self.up3(x4)
+        x3 = torch.cat([self.up3(x4), x3], dim=1)
         x3 = self.conv32(x3)
-        x2 = self.up2(x3)
+        x2 = torch.cat([self.up2(x3), x2], dim=1)
         x2 = self.conv22(x2)
-        x1 = self.up1(x2)
+        x1 = torch.cat([self.up1(x2), x1], dim=1)
         x1 = self.conv13(x1)
         x = self.conv14(x1)
 
@@ -433,18 +411,18 @@ class VQUNet3Dposv3(nn.Module):
         self.down4 = nn.Conv3d(channels*8, channels*16, kernel_size=3, padding=1, stride=2, bias=use_bias)
         self.conv51 = ResnetBlock(in_channels=channels*16, out_channels=channels*16, dropout=dropout)
         self.quant_conv = torch.nn.Conv3d(channels*16, embed_dim, 1)
-        self.p_enc_3d = PositionalEncodingPermute3D(embed_dim)
-        self.quantize = VectorQuantizer2(n_embed, embed_dim, beta=0.25, sane_index_shape=True, legacy=False)
+        self.p_enc_3d = PositionalEncodingPermute3D(channels*16)
+        self.quantize = VectorQuantizer2(n_embed, embed_dim, beta=0.25, sane_index_shape=True)
         self.post_quant_conv = torch.nn.Conv3d(embed_dim, channels*16, 1)
         self.conv52 = ResnetBlock(in_channels=channels*16, out_channels=channels*16,dropout=dropout)
         self.up4 =  Upsample(channels*16, True)
-        self.conv42 = ResnetBlock(in_channels=channels*16, out_channels=channels*8, dropout=dropout)
+        self.conv42 = ResnetBlock(in_channels=channels*24, out_channels=channels*8, dropout=dropout)
         self.up3 =  Upsample(channels*8, True)
-        self.conv32 = ResnetBlock(in_channels=channels*8, out_channels=channels*4, dropout=dropout)
+        self.conv32 = ResnetBlock(in_channels=channels*12, out_channels=channels*4, dropout=dropout)
         self.up2 = Upsample(channels*4, True)
-        self.conv22 = ResnetBlock(in_channels=channels*4, out_channels=channels*2, dropout=dropout)
+        self.conv22 = ResnetBlock(in_channels=channels*6, out_channels=channels*2, dropout=dropout)
         self.up1 = Upsample(channels*2, True)
-        self.conv13 = ResnetBlock(in_channels=channels*2, out_channels=channels, dropout=dropout)
+        self.conv13 = ResnetBlock(in_channels=channels*3, out_channels=channels, dropout=dropout)
         self.conv14 = nn.Conv3d(channels, num_classes, kernel_size=1, padding=0, bias=use_bias)
 
     def forward(self, x):
@@ -459,20 +437,18 @@ class VQUNet3Dposv3(nn.Module):
         x5 = self.down4(x4)
         x5 = self.conv51(x5)
         x5 = self.quant_conv(x5)
-        x5 = x5 + 0.1 * self.p_enc_3d(x5)
-        if self.training:
-            x5 = x5 + 0.01 * torch.randn_like(x5)
+        x5 = self.p_enc_3d(x5)
         quant, emb_loss, info = self.quantize(x5)
         indices = info[2]
         x5 = self.post_quant_conv(quant)
         x5 = self.conv52(x5)
-        x4 = self.up4(x5)
+        x4 = torch.cat([self.up4(x5), x4], dim=1)
         x4 = self.conv42(x4)
-        x3 = self.up3(x4)
+        x3 = torch.cat([self.up3(x4), x3], dim=1)
         x3 = self.conv32(x3)
-        x2 = self.up2(x3)
+        x2 = torch.cat([self.up2(x3), x2], dim=1)
         x2 = self.conv22(x2)
-        x1 = self.up1(x2)
+        x1 = torch.cat([self.up1(x2), x1], dim=1)
         x1 = self.conv13(x1)
         x = self.conv14(x1)
 
@@ -495,22 +471,22 @@ class VQUNet3Dposv4(nn.Module):
         self.down4 = nn.Conv3d(channels*8, channels*16, kernel_size=3, padding=1, stride=2, bias=use_bias)
         self.conv51 = ResnetBlock(in_channels=channels*16, out_channels=channels*16, dropout=dropout)
         self.quant_conv1 = torch.nn.Conv3d(channels * 8, embed_dim, 1)
-        self.p_enc_3d1 = PositionalEncodingPermute3D(embed_dim)
-        self.quantize1 = VectorQuantizer2(n_embed*2, embed_dim, beta=0.25, sane_index_shape=True, legacy=False)
+        self.p_enc_3d1 = PositionalEncodingPermute3D(channels * 16)
+        self.quantize1 = VectorQuantizer2(n_embed*2, embed_dim, beta=0.25)
         self.post_quant_conv1 = torch.nn.Conv3d(embed_dim, channels * 8, 1)
         self.quant_conv2 = torch.nn.Conv3d(channels*16, embed_dim, 1)
-        self.p_enc_3d2 = PositionalEncodingPermute3D(embed_dim)
-        self.quantize2 = VectorQuantizer2(n_embed,   embed_dim, beta=0.25, sane_index_shape=True, legacy=False)
+        self.p_enc_3d2 = PositionalEncodingPermute3D(channels*16)
+        self.quantize2 = VectorQuantizer2(n_embed, embed_dim, beta=0.25)
         self.post_quant_conv2 = torch.nn.Conv3d(embed_dim, channels*16, 1)
         self.conv52 = ResnetBlock(in_channels=channels*16, out_channels=channels*16,dropout=dropout)
         self.up4 = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
-        self.conv42 = ResnetBlock(in_channels=channels*16, out_channels=channels*8, dropout=dropout)
+        self.conv42 = ResnetBlock(in_channels=channels*24, out_channels=channels*8, dropout=dropout)
         self.up3 = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
-        self.conv32 = ResnetBlock(in_channels=channels*8, out_channels=channels*4, dropout=dropout)
+        self.conv32 = ResnetBlock(in_channels=channels*12, out_channels=channels*4, dropout=dropout)
         self.up2 = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
-        self.conv22 = ResnetBlock(in_channels=channels*4, out_channels=channels*2, dropout=dropout)
+        self.conv22 = ResnetBlock(in_channels=channels*6, out_channels=channels*2, dropout=dropout)
         self.up1 = nn.Upsample(scale_factor=2, mode='trilinear', align_corners=False)
-        self.conv13 = ResnetBlock(in_channels=channels*2, out_channels=channels, dropout=dropout)
+        self.conv13 = ResnetBlock(in_channels=channels*3, out_channels=channels, dropout=dropout)
         self.conv14 = nn.Conv3d(channels, num_classes, kernel_size=1, padding=0, bias=use_bias)
 
     def forward(self, x):
@@ -523,27 +499,25 @@ class VQUNet3Dposv4(nn.Module):
         x4 = self.down3(x3)
         x4 = self.conv41(x4)
         x4x = self.quant_conv1(x4)
-        x4x = x4x + 0.1 * self.p_enc_3d1(x4x)
+        x4x = self.p_enc_3d1(x4x)
         quant, emb_loss, info = self.quantize1(x4x)
-        indices_shallow = info[2]
         x4x = self.post_quant_conv1(quant)
         
         x5 = self.down4(x4)
         x5 = self.conv51(x5)
         x5 = self.quant_conv2(x5)
-        x5 = x5 + 0.1 * self.p_enc_3d2(x5)
+        x5 = self.p_enc_3d2(x5)
         quant1, emb_loss1, info1 = self.quantize2(x5)
-        indices_deep = info1[2]
         x5 = self.post_quant_conv2(quant1)
         x5 = self.conv52(x5)
-        x4 = self.up4(x5)
+        x4 = torch.cat([self.up4(x5), x4x], dim=1)
         x4 = self.conv42(x4)
-        x3 = self.up3(x4)
+        x3 = torch.cat([self.up3(x4), x3], dim=1)
         x3 = self.conv32(x3)
-        x2 = self.up2(x3)
+        x2 = torch.cat([self.up2(x3), x2], dim=1)
         x2 = self.conv22(x2)
-        x1 = self.up1(x2)
+        x1 = torch.cat([self.up1(x2), x1], dim=1)
         x1 = self.conv13(x1)
         x = self.conv14(x1)
 
-        return x, emb_loss, emb_loss1, quant1, indices_deep
+        return x, emb_loss, emb_loss1, quant

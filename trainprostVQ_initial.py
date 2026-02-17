@@ -72,7 +72,7 @@ import pandas as pd
 import numpy as np
 import torch
 import torchvision
-from convnet3D_utils_dep import  UNet3Dv2,  VQUNet3Dposv3, GumbelUNet3Dpos
+from convnet3D_utils_dep import  VQUNet3Dposv3
 import torchvision.transforms as T
 from transformers.optimization import get_cosine_schedule_with_warmup
 from einops import rearrange
@@ -485,9 +485,9 @@ if __name__ == '__main__':
             inputchannels=1,
             num_classes=3,
             channels=16,
-            dropout=0,
+            dropout=0.0,
             n_embed=1024,
-            embed_dim=64,
+            embed_dim=256,
             w_d = 0.8,
             w_hd = 0.1,
             w_asd = 0.1,
@@ -528,7 +528,7 @@ if __name__ == '__main__':
         )
         # initialise Lightning's trainer.
         trainer = pytorch_lightning.Trainer(
-            gpus=[3],
+            gpus=[0],
             max_epochs=net.max_epochs,
             check_val_every_n_epoch=net.check_val,
             #callbacks=[checkpoint_dice, checkpoint_multi, early_stopping],
