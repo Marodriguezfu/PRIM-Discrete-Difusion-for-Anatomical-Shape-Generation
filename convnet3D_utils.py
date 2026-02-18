@@ -477,6 +477,92 @@ class VQUNet3Dposv3(nn.Module):
         x = self.conv14(x1)
 
         return x, emb_loss, quant, indices
+    
+    def encode(self, x: torch.Tensor, add_noise: bool = False, return_quant: bool = False):
+        """
+        Encode input x -> token indices (and optionally quantized latent).
+        x: [B, C, H, W, D]
+        returns:
+          - indices: [B, Ht, Wt, Dt]
+          - (optional) quant: [B, embed_dim, Ht, Wt, Dt], emb_loss: scalar
+        """
+        # Encoder trunk (same as forward)
+        x1 = self.conv11(x)
+        x1 = self.conv12(x1)
+        x2 = self.down1(x1)
+        x2 = self.conv21(x2)
+        x3 = self.down2(x2)
+        x3 = self.conv31(x3)
+        x4 = self.down3(x3)
+        x4 = self.conv41(x4)
+        x5 = self.down4(x4)
+        x5 = self.conv51(x5)
+
+        # To embedding space + positional encoding (same as forward)
+        x5 = self.quant_conv(x5)
+        x5 = x5 + 0.1 * self.p_enc_3d(x5)
+
+        # Optional noise (useful during VQ training; keep OFF for deterministic token export)
+        if add_noise:
+            x5 = x5 + 0.01 * torch.randn_like(x5)
+
+        # Quantize -> indices
+        quant, emb_loss, info = self.quantize(x5)
+        indices = info[2]  # sane_index_shape=True => [B,Ht,Wt,Dt]
+
+        if return_quant:
+            return quant, emb_loss, indices
+        return indices
+
+    def decode_quant(self, quant: torch.Tensor) -> torch.Tensor:
+        """
+        Decode from quantized latent (continuous) to logits.
+        quant: [B, embed_dim, Ht, Wt, Dt]
+        returns logits: [B, num_classes, H, W, D]
+        """
+        x5 = self.post_quant_conv(quant)
+        x5 = self.conv52(x5)
+        x4 = self.up4(x5)
+        x4 = self.conv42(x4)
+        x3 = self.up3(x4)
+        x3 = self.conv32(x3)
+        x2 = self.up2(x3)
+        x2 = self.conv22(x2)
+        x1 = self.up1(x2)
+        x1 = self.conv13(x1)
+        logits = self.conv14(x1)
+        return logits
+
+    def decode_indices(self, indices: torch.Tensor) -> torch.Tensor:
+        """
+        Decode from token indices to logits, using the codebook.
+        indices: [B, Ht, Wt, Dt] (or [Ht,Wt,Dt])
+        returns logits: [B, num_classes, H, W, D]
+        """
+        if indices.ndim == 3:
+            indices = indices.unsqueeze(0)
+        if indices.ndim != 4:
+            raise ValueError(f"indices must have shape [B,Ht,Wt,Dt], got {tuple(indices.shape)}")
+
+        if indices.dtype != torch.long:
+            indices = indices.long()
+
+        b, ht, wt, dt = indices.shape
+        # VectorQuantizer2.get_codebook_entry expects a 5D "view" shape: (B,Ht,Wt,Dt,embed_dim)
+        shape = (b, ht, wt, dt, self.quantize.e_dim)
+        device = self.quantize.embedding.weight.device
+        indices = indices.to(device)
+        quant = self.quantize.get_codebook_entry(indices, shape=shape)  # -> [B, embed_dim, Ht, Wt, Dt]
+        return self.decode_quant(quant)
+
+    @torch.no_grad()
+    def decode_indices_to_seg(self, indices: torch.Tensor) -> torch.Tensor:
+        """
+        Convenience: indices -> argmax segmentation [B,1,H,W,D]
+        """
+        logits = self.decode_indices(indices)
+        seg = torch.argmax(logits, dim=1, keepdim=True)
+        return seg
 
 class VQUNet3Dposv4(nn.Module):
 

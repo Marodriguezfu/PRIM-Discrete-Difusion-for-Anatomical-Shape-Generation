@@ -1,4 +1,4 @@
-import os, glob, re
+import sys, os, glob, re
 from typing import Optional, List
 import torch
 import torch.nn as nn
@@ -10,11 +10,13 @@ import numpy as np
 import pytorch_lightning
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+from pytorch_lightning.utilities.rank_zero import rank_zero_only
 import nibabel as nib
 from monai.losses import DiceCELoss
 from monai.transforms import (
     AsDiscrete,
-    AddChanneld,
+    #AddChanneld,
+    EnsureChannelFirstd,
     Compose,
     CropForegroundd,
     LoadImaged,
@@ -36,11 +38,9 @@ from monai.transforms import (
     RandBiasFieldd,
 
 )
-from monai.metrics import DiceMetric, compute_hausdorff_distance, compute_average_surface_distance,  compute_meandice
-from monai.data import decollate_batch
+from monai.metrics import DiceMetric, compute_hausdorff_distance, compute_average_surface_distance, compute_dice
 
 from tqdm import tqdm
-from argparse import ArgumentParser
 
 from convnet3D_utils import  VQUNet3Dposv3
 
@@ -49,6 +49,11 @@ num_classes = 14
 batch_size = 100
 epochs = 300
 num_workers = 4
+
+@rank_zero_only
+def r0(msg: str):
+    sys.__stdout__.write(msg + "\n")
+    sys.__stdout__.flush()
 
 @torch.no_grad()
 def boundary_from_onehot(onehot: torch.Tensor, k: int = 3) -> torch.Tensor:
@@ -91,7 +96,8 @@ class ProstateDataset(Dataset):
                 LoadImaged(
                     keys = ["image", "label"]
                 ),
-                AddChanneld(keys=["image", "label"]),
+                #AddChanneld(keys=["image", "label"]),
+                EnsureChannelFirstd(keys=["image", "label"]),
                 Spacingd(
                     keys=["image", "label"], 
                     pixdim=(0.5, 0.5, 1.5), 
@@ -143,7 +149,8 @@ class ProstateDataset(Dataset):
                 LoadImaged(
                     keys = ["image", "label"]
                 ),
-                AddChanneld(keys=["image", "label"]),
+                #AddChanneld(keys=["image", "label"]),
+                EnsureChannelFirstd(keys=["image", "label"]),
                 Spacingd(
                     keys=["image", "label"], 
                     pixdim=(0.5, 0.5, 1.5), 
@@ -267,9 +274,9 @@ class Net(pl.LightningModule):
         )
         # CE weights with correct length (equal to num_classes)
         w = torch.ones(num_classes, dtype=torch.float32)
-        w[0] = 0.05  # background más bajo
-        self.loss_function = DiceCELoss(to_onehot_y=True, softmax=True, ce_weight=w)
-
+        w[0] = 0.05
+        #self.loss_function = DiceCELoss(to_onehot_y=True, softmax=True, ce_weight=w)
+        self.loss_function = DiceCELoss(to_onehot_y=True, softmax=True, weight=w)
         self.post_pred = AsDiscrete(argmax=True, to_onehot=num_classes)
         self.post_label = AsDiscrete(to_onehot=num_classes)
 
@@ -295,6 +302,9 @@ class Net(pl.LightningModule):
 
         #self.bn = int(math.ceil(self.trainlen/batch_size))
 
+    def on_validation_epoch_start(self):
+        self._val_outputs = []
+
     def forward(self, input, return_indices: bool = False):
         logits, emb_loss, quant, indices = self._model(input)
         if return_indices:
@@ -306,6 +316,35 @@ class Net(pl.LightningModule):
         if return_indices:
             return logits, indices
         return logits
+    
+    def encode_x(self, x: torch.Tensor, add_noise: bool = False) -> torch.Tensor:
+        """
+        x: model input (onehot(+boundary)) [B,C,H,W,D]
+        returns indices [B,Ht,Wt,Dt]
+        """
+        return self._model.encode(x, add_noise=add_noise, return_quant=False)
+
+    def encode_labels(self, labels: torch.Tensor, add_noise: bool = False) -> torch.Tensor:
+        """
+        labels: raw segmentation [B,1,H,W,D] (or [B,H,W,D])
+        returns indices [B,Ht,Wt,Dt]
+        """
+        x = self.build_x(labels)
+        return self.encode_x(x, add_noise=add_noise)
+
+    def decode_indices(self, indices: torch.Tensor) -> torch.Tensor:
+        """
+        indices: [B,Ht,Wt,Dt]
+        returns logits: [B,num_classes,H,W,D]
+        """
+        return self._model.decode_indices(indices)
+
+    @torch.no_grad()
+    def decode_indices_to_seg(self, indices: torch.Tensor) -> torch.Tensor:
+        """
+        indices -> segmentation [B,1,H,W,D]
+        """
+        return self._model.decode_indices_to_seg(indices)
     
     @torch.no_grad()
     def token_stats_by_class(self, indices: torch.Tensor, labels: torch.Tensor, num_classes: int):
@@ -324,24 +363,27 @@ class Net(pl.LightningModule):
 
         lab_ds = F.interpolate(lab, size=indices.shape[1:], mode="nearest").long().squeeze(1)
 
-        print(f"\n[Epoch {self.current_epoch}] Token stats by class (grid={tuple(indices.shape[1:])})")
+        lines = []
+        lines.append(f"[Epoch {self.current_epoch}] Token stats by class (grid={tuple(indices.shape[1:])})")
+
         for c in range(num_classes):
             mask = (lab_ds == c)
             ids = indices[mask]
 
             if ids.numel() == 0:
-                print(f"  class {c}: n_tokens=0 (It does not appear in this batch.)")
+                lines.append(f"  class {c}: n_tokens=0 (not in batch)")
                 continue
 
             uniq, cnt = torch.unique(ids, return_counts=True)
-
             k = min(5, cnt.numel())
             top_cnt, top_pos = torch.topk(cnt, k=k)
 
-            print(f"  class {c}: n_tokens={ids.numel()}, unique={uniq.numel()}")
+            lines.append(f"  class {c}: n_tokens={ids.numel()}, unique={uniq.numel()}")
             for j in range(k):
                 pos = top_pos[j].item()
-                print(f"    id {int(uniq[pos])}  count {int(top_cnt[j])}")
+                lines.append(f"    id {int(uniq[pos])}  count {int(top_cnt[j])}")
+
+        r0("\n".join(lines))
 
     #def get_input(self, batch, k):
     #    x = batch[k]
@@ -372,26 +414,26 @@ class Net(pl.LightningModule):
         self.log("codebook/usage_frac", usage_frac, prog_bar=True, on_step=False, on_epoch=True)
         self.log("codebook/perplexity", ppl, prog_bar=False, on_step=False, on_epoch=True)
 
-        if self.trainer.is_global_zero:
+        if self.trainer.is_global_zero and (batch_idx == 0 or batch_idx % 20 == 0):
             k = min(10, hist.numel())
             top_ids = torch.topk(hist, k=k).indices
             top_counts = hist[top_ids].to(torch.int64)
             pairs = list(zip(top_ids.tolist(), top_counts.tolist()))
-            print(f"[Epoch {self.current_epoch}] codebook usage={usage_frac:.3f} perplexity={ppl:.1f} top={pairs}")
-
-        # Loss SIEMPRE con logits (tensor), no con post_pred
+            r0(f"[Train][Epoch {self.current_epoch}][b{batch_idx}] usage={usage_frac:.3f} ppl={ppl:.1f} top={pairs}")
         seg_loss = self.loss_function(logits, labels)
         cap = 1.0
         emb_weight = min(cap, cap * float(self.current_epoch + 1) / float(self.warmup_epochs))
         loss = seg_loss + emb_weight * emb_loss
 
-        # Métricas con discretización
-        preds = [self.post_pred(i) for i in decollate_batch(logits)]
-        labels1 = [self.post_label(i) for i in decollate_batch(labels)]
+        #preds = [self.post_pred(i) for i in decollate_batch(logits)]
+        #labels1 = [self.post_label(i) for i in decollate_batch(labels)]
+        '''preds = [self.post_pred(i) for i in self._iter_batch(logits)]
+        labels1 = [self.post_label(i) for i in self._iter_batch(labels)]
         self.dice_metric(y_pred=preds, y=labels1)
-        self.dice_metric.reset()
+        self.dice_metric.reset()'''
 
-        self.log("train_loss", loss, prog_bar=True, logger=True)
+        #self.log("train_loss", loss, prog_bar=True, logger=True)
+        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         self.log("train_seg_loss", seg_loss, on_step=False, on_epoch=True, prog_bar=False, logger=True)
         self.log("train_emb_loss", emb_loss, on_step=False, on_epoch=True, prog_bar=False, logger=True)
         self.log("train_emb_w", emb_weight, on_step=False, on_epoch=True, prog_bar=False, logger=True)
@@ -418,7 +460,7 @@ class Net(pl.LightningModule):
         return loss
 
 
-    def training_epoch_end(self, outputs):
+    '''def training_epoch_end(self, outputs):
         if len(outputs) == 0:
             return
 
@@ -433,7 +475,9 @@ class Net(pl.LightningModule):
         losses = [l if isinstance(l, torch.Tensor) else torch.tensor(l) for l in losses]
 
         avg_loss = torch.stack(losses).mean()
-        self.epoch_loss_values.append(float(avg_loss.detach().cpu()))
+        self.epoch_loss_values.append(float(avg_loss.detach().cpu()))'''
+    
+
 
     def validation_step(self, batch, batch_idx):
         images, labels = batch["image"], batch["label"]
@@ -456,16 +500,15 @@ class Net(pl.LightningModule):
             k = min(10, hist.numel())
             topv, topi = torch.topk(hist, k=k)
             top_list = [(int(i), int(v)) for i, v in zip(topi.cpu(), topv.cpu())]
-            print(f"[Epoch {self.current_epoch}] codebook usage={usage:.3f} perplexity={perplexity:.1f} top={top_list}")
-
         self.log("val_loss", loss, prog_bar=True, logger=True)
         self.log("val_seg_loss", seg_loss, prog_bar=False, logger=True)
         self.log("val_emb_loss", emb_loss, prog_bar=False, logger=True)
         self.log("val_emb_w", emb_weight, prog_bar=False, logger=True)
 
-        # Métricas: discretiza a partir de logits
-        preds = [self.post_pred(i) for i in decollate_batch(logits)]
-        labels1 = [self.post_label(i) for i in decollate_batch(labels)]
+        #preds = [self.post_pred(i) for i in decollate_batch(logits)]
+        #labels1 = [self.post_label(i) for i in decollate_batch(labels)]
+        preds = [self.post_pred(i) for i in self._iter_batch(logits)]
+        labels1 = [self.post_label(i) for i in self._iter_batch(labels)]
         self.dice_metric(y_pred=preds, y=labels1)
 
         hd = compute_hausdorff_distance(
@@ -479,9 +522,15 @@ class Net(pl.LightningModule):
             include_background=False
         )
 
-        return {"val_loss": loss, "hd": hd, "asd": asd, "val_number": logits.shape[0]}
+        #return {"val_loss": loss, "hd": hd, "asd": asd, "val_number": logits.shape[0]}
 
-    def validation_epoch_end(self, outputs):
+        out = {"val_loss": loss.detach(), "hd": hd.detach(), "asd": asd.detach(), "val_number": logits.shape[0]}
+        self._val_outputs.append(out)
+        return out
+    
+    #def validation_epoch_end(self, outputs):
+    def on_validation_epoch_end(self):
+        outputs = self._val_outputs
         val_loss, num_items, hd, asd = 0.0, 0, 0.0, 0.0
         for output in outputs:
             val_loss += float(output["val_loss"].sum().item())
@@ -523,7 +572,7 @@ class Net(pl.LightningModule):
             self.best_multi = multi_score
             self.best_multi_epoch = self.current_epoch
 
-        print(
+        '''print(
             f"epoch {self.current_epoch}: "
             f"Dice={mean_val_dice:.4f}, "
             f"HD={mean_hd:.4f}, "
@@ -531,8 +580,18 @@ class Net(pl.LightningModule):
             f"Multi={multi_score:.4f}\n"
             f"best Dice={self.best_val_dice:.4f} @ epoch {self.best_val_epoch}, "
             f"best Multi={self.best_multi:.4f} @ epoch {self.best_multi_epoch}"
+        )'''
+        msg = (
+            f"epoch {self.current_epoch}: "
+            f"Dice={mean_val_dice:.4f}, HD={mean_hd:.4f}, ASD={mean_asd:.4f}, Multi={multi_score:.4f}\n"
+            f"best Dice={self.best_val_dice:.4f} @ epoch {self.best_val_epoch}, "
+            f"best Multi={self.best_multi:.4f} @ epoch {self.best_multi_epoch}\n"
         )
+
+        sys.__stdout__.write(msg)
+        sys.__stdout__.flush()
         self.metric_values.append(mean_val_dice)
+        self._val_outputs = []
 
     def test_step(self, batch, batch_idx):
         images, labels = batch["image"], batch["label"]
@@ -543,11 +602,19 @@ class Net(pl.LightningModule):
         loss = self.loss_function(outputs, labels.long())
         print('test Loss: %.3f' % (loss))
 
-        outputs = [self.post_pred(i) for i in decollate_batch(outputs)]
-        labels1 = [self.post_label(i) for i in decollate_batch(labels)]
-
-        dice = torch.mean(
+        #outputs = [self.post_pred(i) for i in decollate_batch(outputs)]
+        #labels1 = [self.post_label(i) for i in decollate_batch(labels)]
+        outputs = [self.post_pred(i) for i in self._iter_batch(outputs)]
+        labels1  = [self.post_label(i) for i in self._iter_batch(labels)]
+        '''dice = torch.mean(
             compute_meandice(
+                y_pred=torch.stack(outputs, dim=0),
+                y=torch.stack(labels1, dim=0),
+                include_background=False,
+            )
+        )'''
+        dice = torch.mean(
+            compute_dice(
                 y_pred=torch.stack(outputs, dim=0),
                 y=torch.stack(labels1, dim=0),
                 include_background=False,
@@ -601,7 +668,13 @@ class Net(pl.LightningModule):
 
         return loss
 
-    def test_epoch_end(self, outputs):
+    def _iter_batch(self, x):
+        if hasattr(x, "as_tensor"):  # MetaTensor
+            x = x.as_tensor()
+        return torch.unbind(x, dim=0)
+
+    #def test_epoch_end(self, outputs):
+    def on_test_epoch_end(self):    
         # Create results folder (if it does not exist)
         results_dir = os.path.dirname(self.test_results_csv)
         os.makedirs(results_dir, exist_ok=True)
@@ -621,7 +694,6 @@ class Net(pl.LightningModule):
             bnd = boundary_from_onehot(onehot, k=self.hparams.boundary_k)  # [B,1,...]
             x = torch.cat([onehot, bnd], dim=1)                            # [B,C+1,...]
 
-        # chequeo defensivo (tu error actual queda prevenido aquí)
         expected = self.hparams.inputchannels
         if x.shape[1] != expected:
             raise RuntimeError(
@@ -666,18 +738,23 @@ def get_highest_epoch_ckpt(root_dir: str, patterns: Optional[List[str]] = None) 
     return ckpts[-1]
 
 def export_token_indices(trainer, model: Net, dataloader, out_path: str):
+    was_training = model.training
     model.eval()
     all_tokens = []
     with torch.no_grad():
         for batch in dataloader:
-            labels = batch["label"].to(model.device)
+            labels = batch["label"]
+            if hasattr(labels, "as_tensor"):   # MONAI MetaTensor
+                labels = labels.as_tensor()
+            labels = labels.to(model.device)
             x = model.build_x(labels)
-            _, _, indices = model.forward(x, return_indices=True)
+            indices = model.encode_x(x, add_noise=False)
             all_tokens.append(indices.cpu())
-
     tokens = torch.cat(all_tokens, dim=0)
     torch.save(tokens, out_path)
     print(f"Saved tokens: {tokens.shape} -> {out_path}")
+    if was_training:
+        model.train()
 
 if __name__ == '__main__':
         pl.seed_everything(42, workers=True)
@@ -710,13 +787,14 @@ if __name__ == '__main__':
             w_d=0.8,
             w_hd=0.1,
             w_asd=0.1,
-            max_epochs=10,
+            max_epochs=2,
             check_val=1,
             output_root=root_dir,
         )
+
         data = ProstateDataModule(
             batch_size=1,
-            num_workers=4,
+            num_workers=2, #4,
             csv_train_img="./train.csv",
             csv_val_img="./validation.csv",
             csv_test_img="./test.csv",
@@ -746,18 +824,32 @@ if __name__ == '__main__':
             verbose=True,
         )
         # initialise Lightning's trainer.
-        trainer = pytorch_lightning.Trainer(
+        '''trainer = pytorch_lightning.Trainer(
             gpus=[2],
             max_epochs=net.max_epochs,
             check_val_every_n_epoch=net.check_val,
             #callbacks=[checkpoint_dice, checkpoint_multi, early_stopping],
             callbacks=[checkpoint_dice,checkpoint_multi],
             default_root_dir=root_dir,
+        )'''
+
+        trainer = pytorch_lightning.Trainer(
+            accelerator="gpu",
+            devices=1,
+            max_epochs=net.max_epochs,
+            check_val_every_n_epoch=net.check_val,
+            callbacks=[checkpoint_dice, checkpoint_multi],
+            default_root_dir=root_dir,
+            enable_progress_bar=False,
+            log_every_n_steps=20,
         )
 
         os.makedirs(net.test_output_dir, exist_ok=True)
         os.makedirs(os.path.dirname(net.test_results_csv), exist_ok=True)
 
+        net.train()
+        net._model.train()
+        
         try:
             # Newer Lightning
             if resume_ckpt is not None:
@@ -777,6 +869,22 @@ if __name__ == '__main__':
                     resume_from_checkpoint=resume_ckpt,
                 )
             trainer.fit(net, data)
+        
+        #########################
+        # TEST 
+
+        net.eval()
+        batch = next(iter(data.val_dataloader()))
+        labels = batch["label"].to(net.device)
+
+        x = net.build_x(labels)
+        logits_fwd, emb_loss, indices = net.forward(x, return_indices=True)
+
+        logits_dec = net.decode_indices(indices)
+
+        print("max abs diff:", (logits_fwd - logits_dec).abs().max().item())
+
+        #############################"
 
         # ---- select best checkpoints for testing ----
         dice_ckpts  = glob.glob(os.path.join(root_dir, "best_dice_epoch*.ckpt"))
