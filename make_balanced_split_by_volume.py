@@ -26,18 +26,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# Optional backends for mask loading.
-_HAS_NIBABEL = True
-try:
-    import nibabel as nib
-except Exception:
-    _HAS_NIBABEL = False
+import nibabel as nib
 
-_HAS_SIMPLEITK = True
-try:
-    import SimpleITK as sitk
-except Exception:
-    _HAS_SIMPLEITK = False
+import SimpleITK as sitk
 
 
 # -----------------------------------------------------------------------------
@@ -132,7 +123,7 @@ def load_mask(mask_path: Path) -> tuple[np.ndarray, tuple[float, float, float]]:
     """
     path_str = str(mask_path).lower()
 
-    if path_str.endswith((".nii", ".nii.gz")) and _HAS_NIBABEL:
+    if path_str.endswith((".nii", ".nii.gz")):
         image = nib.load(str(mask_path))
         data = image.get_fdata()
         if data.ndim == 4:
@@ -141,7 +132,7 @@ def load_mask(mask_path: Path) -> tuple[np.ndarray, tuple[float, float, float]]:
         spacing = tuple(float(v) for v in zooms[:3]) if len(zooms) >= 3 else (1.0, 1.0, 1.0)
         return np.asarray(data), spacing
 
-    if path_str.endswith(".nrrd") and _HAS_SIMPLEITK:
+    if path_str.endswith(".nrrd"):
         image = sitk.ReadImage(str(mask_path))
         data = sitk.GetArrayFromImage(image)  # (z, y, x)
         data = np.moveaxis(data, 0, -1)       # (y, x, z)
