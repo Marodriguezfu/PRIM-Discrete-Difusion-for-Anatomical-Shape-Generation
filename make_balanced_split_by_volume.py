@@ -2,318 +2,373 @@
 # -*- coding: utf-8 -*-
 
 """
-Create balanced splits (70/15/15) stratified by TZ and PZ volume.
-- Reads one or several CSVs (existing train/val/test or a master file);
-- Computes TZ(=1) and PZ(=2) volumes;
-- Generates mask_volumes.csv (per-row report);
-- Splits by patient while balancing TZ/PZ bins;
-- Writes new train.csv / validation.csv / test.csv.
+Create balanced prostate dataset splits with a fixed 70/15/15 ratio.
+
+This script has no command-line arguments. It reads the master case list from
+`./data/Prostate/all_cases.csv`, computes TZ and PZ mask volumes, creates a
+balanced patient-level split, and saves:
+
+- `mask_volumes.csv`
+- `train.csv`
+- `validation.csv`
+- `test.csv`
+
+The output CSV format matches the existing dataloader format:
+an unnamed index column plus `images` and `labels`.
 """
 
-import os
+from __future__ import annotations
+
 import re
-import argparse
 import warnings
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
-# Try to support both NIfTI and NRRD
-_HAS_NIB = True
+# Optional backends for mask loading.
+_HAS_NIBABEL = True
 try:
     import nibabel as nib
 except Exception:
-    _HAS_NIB = False
+    _HAS_NIBABEL = False
 
-_HAS_SITK = True
+_HAS_SIMPLEITK = True
 try:
     import SimpleITK as sitk
 except Exception:
-    _HAS_SITK = False
+    _HAS_SIMPLEITK = False
 
 
-def infer_patient_id(path: str) -> str:
+# -----------------------------------------------------------------------------
+# Fixed configuration
+# -----------------------------------------------------------------------------
+
+TRAIN_RATIO = 0.70
+VAL_RATIO = 0.15
+TEST_RATIO = 0.15
+RANDOM_STATE = 42
+TZ_LABEL = 1
+PZ_LABEL = 2
+
+PROJECT_ROOT = Path.cwd()
+DATA_DIR = PROJECT_ROOT / "data" / "Prostate"
+INPUT_CSV = DATA_DIR / "all_cases.csv"
+MASK_VOLUMES_CSV = "mask_volumes.csv"
+TRAIN_CSV = "train.csv"
+VALIDATION_CSV = "validation.csv"
+TEST_CSV = "test.csv"
+
+
+# -----------------------------------------------------------------------------
+# Utility functions
+# -----------------------------------------------------------------------------
+
+
+def resolve_path(path_str: str, base_dir: Path) -> Path:
+    """Resolve an image or mask path relative to the project root or CSV folder."""
+    path = Path(path_str)
+    if path.is_absolute() and path.exists():
+        return path
+
+    project_candidate = PROJECT_ROOT / path
+    if project_candidate.exists():
+        return project_candidate
+
+    csv_candidate = base_dir / path
+    if csv_candidate.exists():
+        return csv_candidate
+
+    # Return the project-relative candidate for clearer error messages.
+    return project_candidate
+
+
+
+def infer_patient_id(path_str: str) -> str:
     """
-    Extract a stable patient_id from the file path.
-    Adjust the regex to your folder structure.
-    Tries to capture /<center>/<CaseXX>.nii.gz
+    Extract a stable patient identifier from a mask path.
 
-    Examples:
-      .../Prostate/BMC/Case12.nii.gz  --> BMC_Case12
-      .../Prostate/RUNMC/Case03.nii   --> RUNMC_Case03
-    Fallback: <parentdir>_<stem>
+    Supported examples:
+    - data/Prostate/masks/Case00_Segmentation.nii.gz -> Case00
+    - .../BMC/Case12.nii.gz -> BMC_Case12
+    - .../RUNMC/Case03.nrrd -> RUNMC_Case03
     """
-    m = re.search(r"/(BMC|RUNMC)/(?P<case>Case\d+)\.", path, flags=re.IGNORECASE)
-    if m:
-        center = m.group(1)
-        case = m.group("case")
+    normalized = path_str.replace("\\", "/")
+
+    center_case_match = re.search(
+        r"/(BMC|RUNMC)/(?P<case>Case\d+)(?:_Segmentation)?(?:\.nii(?:\.gz)?|\.nrrd)$",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if center_case_match:
+        center = center_case_match.group(1)
+        case = center_case_match.group("case")
         return f"{center}_{case}"
-    # Generic fallback
-    parent = os.path.basename(os.path.dirname(path))
-    stem = os.path.splitext(os.path.basename(path))[0]
-    # Handle .nii.gz
-    if stem.endswith(".nii"):
-        stem = stem[:-4]
-    return f"{parent}_{stem}"
+
+    case_match = re.search(
+        r"(?P<case>Case\d+)(?:_Segmentation)?(?:\.nii(?:\.gz)?|\.nrrd)$",
+        normalized,
+    )
+    if case_match:
+        return case_match.group("case")
+
+    path = Path(path_str)
+    stem = path.name
+    for suffix in (".nii.gz", ".nii", ".nrrd"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    stem = stem.replace("_Segmentation", "")
+    return stem
 
 
-def load_mask(path: str) -> (np.ndarray, tuple):
+
+def load_mask(mask_path: Path) -> tuple[np.ndarray, tuple[float, float, float]]:
     """
-    Load the mask and return (array, spacing_mm).
-    spacing_mm = (sx, sy, sz) or (1,1,1) if not available.
-    Supports NIfTI (nibabel) and NRRD (SimpleITK).
+    Load a segmentation mask and return ``(array, spacing_mm)``.
+
+    NIfTI files are loaded with nibabel when available.
+    NRRD files are loaded with SimpleITK when available.
     """
-    ext = path.lower()
-    if (ext.endswith(".nii") or ext.endswith(".nii.gz")) and _HAS_NIB:
-        img = nib.load(path)
-        data = img.get_fdata()
-        # Ensure 3D
+    path_str = str(mask_path).lower()
+
+    if path_str.endswith((".nii", ".nii.gz")) and _HAS_NIBABEL:
+        image = nib.load(str(mask_path))
+        data = image.get_fdata()
         if data.ndim == 4:
-            # If last dim is 1, squeeze; otherwise, take channel 0
             data = data[..., 0]
-        zooms = img.header.get_zooms()
-        if len(zooms) >= 3:
-            spacing = tuple(float(z) for z in zooms[:3])
-        else:
-            spacing = (1.0, 1.0, 1.0)
+        zooms = image.header.get_zooms()
+        spacing = tuple(float(v) for v in zooms[:3]) if len(zooms) >= 3 else (1.0, 1.0, 1.0)
         return np.asarray(data), spacing
 
-    if ext.endswith(".nrrd") and _HAS_SITK:
-        img = sitk.ReadImage(path)
-        data = sitk.GetArrayFromImage(img)  # (z,y,x)
-        # Convert to (y,x,z)
-        data = np.moveaxis(data, 0, -1)
-        spacing = img.GetSpacing()  # (sx, sy, sz) in SimpleITK == (x,y,z)
-        # SimpleITK spacing is (x,y,z); our final array is (y,x,z) -> reorder
-        spacing = (spacing[1], spacing[0], spacing[2])
+    if path_str.endswith(".nrrd") and _HAS_SIMPLEITK:
+        image = sitk.ReadImage(str(mask_path))
+        data = sitk.GetArrayFromImage(image)  # (z, y, x)
+        data = np.moveaxis(data, 0, -1)       # (y, x, z)
+        spacing_xyz = image.GetSpacing()      # (x, y, z)
+        spacing = (float(spacing_xyz[1]), float(spacing_xyz[0]), float(spacing_xyz[2]))
         return np.asarray(data), spacing
 
     raise RuntimeError(
-        f"Could not load mask (unsupported extension or missing nibabel/SimpleITK): {path}"
+        f"Unable to load mask: {mask_path}. Install nibabel for NIfTI or SimpleITK for NRRD."
     )
 
 
-def compute_volumes(mask: np.ndarray, spacing: tuple, tz_label=1, pz_label=2):
-    """
-    Returns:
-    - voxel counts for TZ and PZ
-    - volumes in mm3 if spacing>0; otherwise, returns mm3=voxel_count
-    """
-    mask = np.asarray(mask)
-    # Ensure integer dtype to compare labels
-    if not np.issubdtype(mask.dtype, np.integer):
-        mask = np.rint(mask).astype(np.int32)
 
-    tz_vox = int(np.sum(mask == tz_label))
-    pz_vox = int(np.sum(mask == pz_label))
+def compute_volumes(
+    mask: np.ndarray,
+    spacing: tuple[float, float, float],
+    tz_label: int = TZ_LABEL,
+    pz_label: int = PZ_LABEL,
+) -> tuple[int, int, float, float, float]:
+    """Compute TZ/PZ voxel counts and physical volumes in mm³."""
+    mask_array = np.asarray(mask)
+    if not np.issubdtype(mask_array.dtype, np.integer):
+        mask_array = np.rint(mask_array).astype(np.int32)
 
-    sx, sy, sz = spacing if spacing and len(spacing) == 3 else (1.0, 1.0, 1.0)
-    voxel_mm3 = float(sx) * float(sy) * float(sz)
-    if voxel_mm3 <= 0:
-        voxel_mm3 = 1.0  # fallback
+    tz_voxels = int(np.sum(mask_array == tz_label))
+    pz_voxels = int(np.sum(mask_array == pz_label))
 
-    tz_mm3 = tz_vox * voxel_mm3
-    pz_mm3 = pz_vox * voxel_mm3
-    return tz_vox, pz_vox, tz_mm3, pz_mm3, voxel_mm3
+    sx, sy, sz = spacing if len(spacing) == 3 else (1.0, 1.0, 1.0)
+    voxel_volume_mm3 = max(float(sx) * float(sy) * float(sz), 1.0)
 
-
-def read_inputs(csv_paths):
-    dfs = []
-    for p in csv_paths:
-        if not os.path.isfile(p):
-            warnings.warn(f"[WARN] CSV not found: {p}")
-            continue
-        df = pd.read_csv(p)
-        if not {"images", "labels"}.issubset(df.columns):
-            raise ValueError(f"CSV {p} must have columns: images,labels")
-        dfs.append(df)
-    if not dfs:
-        raise ValueError("Could not read any input CSV.")
-    all_df = pd.concat(dfs, ignore_index=True).drop_duplicates()
-    return all_df
+    tz_volume_mm3 = tz_voxels * voxel_volume_mm3
+    pz_volume_mm3 = pz_voxels * voxel_volume_mm3
+    return tz_voxels, pz_voxels, tz_volume_mm3, pz_volume_mm3, voxel_volume_mm3
 
 
-def make_bins(series, n_bins=3):
-    """
-    Returns bins with labels {0,1,2} (low/medium/high) using quantiles.
-    Handles constant series: if all equal, returns all 1 (medium).
-    """
-    s = series.fillna(0).values
-    if np.all(s == s[0]):
-        return pd.Series(np.zeros_like(s, dtype=int) + 1, index=series.index)  # all medium
-    qs = np.quantile(s, [0.33, 0.66])
-    bins = np.zeros_like(s, dtype=int)
-    bins[s > qs[0]] = 1
-    bins[s > qs[1]] = 2
+
+def read_master_csv(csv_path: Path) -> pd.DataFrame:
+    """Read the master CSV and keep only the columns required by the pipeline."""
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Input CSV not found: {csv_path}")
+
+    dataframe = pd.read_csv(csv_path)
+    required_columns = {"images", "labels"}
+    if not required_columns.issubset(dataframe.columns):
+        raise ValueError(f"{csv_path} must contain the columns: images, labels")
+
+    return dataframe[["images", "labels"]].drop_duplicates().reset_index(drop=True)
+
+
+
+def make_bins(series: pd.Series) -> pd.Series:
+    """Create three quantile-based bins: 0=low, 1=medium, 2=high."""
+    values = series.fillna(0).to_numpy()
+    if values.size == 0:
+        return pd.Series(dtype=int, index=series.index)
+    if np.all(values == values[0]):
+        return pd.Series(np.full_like(values, 1, dtype=int), index=series.index)
+
+    q33, q66 = np.quantile(values, [0.33, 0.66])
+    bins = np.zeros_like(values, dtype=int)
+    bins[values > q33] = 1
+    bins[values > q66] = 2
     return pd.Series(bins, index=series.index)
 
 
-def balanced_group_split(df_stats, train_ratio=0.70, val_ratio=0.15, test_ratio=0.15, random_state=42):
-    """
-    Balanced split by TZ/PZ bins and grouped by patient_id.
 
-    Strategy:
-      - stratum = (tz_bin, pz_bin)
-      - group by patient_id and take the mode of the stratum per patient
-      - distribute patients per stratum in round-robin across train/val/test
+def balanced_group_split(
+    stats_df: pd.DataFrame,
+    train_ratio: float = TRAIN_RATIO,
+    val_ratio: float = VAL_RATIO,
+    test_ratio: float = TEST_RATIO,
+    random_state: int = RANDOM_STATE,
+) -> tuple[set[str], set[str], set[str]]:
     """
+    Split patients into train/validation/test while balancing TZ/PZ volume bins.
+
+    The split is patient-level. Each patient is assigned a stratum defined by the
+    mode of its ``(tz_bin, pz_bin)`` combination. Patients are then distributed
+    across train/validation/test in a round-robin fashion inside each stratum.
+    """
+    stats_df = stats_df.copy()
     rng = np.random.default_rng(random_state)
 
-    # stratum label per row (study)
-    df_stats["tz_bin"] = make_bins(df_stats["tz_mm3"])
-    df_stats["pz_bin"] = make_bins(df_stats["pz_mm3"])
-    df_stats["stratum"] = df_stats["tz_bin"].astype(str) + "-" + df_stats["pz_bin"].astype(str)
+    stats_df["tz_bin"] = make_bins(stats_df["tz_mm3"])
+    stats_df["pz_bin"] = make_bins(stats_df["pz_mm3"])
+    stats_df["stratum"] = stats_df["tz_bin"].astype(str) + "-" + stats_df["pz_bin"].astype(str)
 
-    # stratum per patient = mode
-    patient_groups = df_stats.groupby("patient_id")
-    patient_stratum = patient_groups["stratum"].agg(
+    patient_stratum = stats_df.groupby("patient_id")["stratum"].agg(
         lambda x: x.mode().iat[0] if not x.mode().empty else x.iloc[0]
     )
 
     patients = patient_stratum.index.to_numpy()
-    strata = patient_stratum.values
+    strata = patient_stratum.to_numpy()
+    unique_strata = np.unique(strata)
 
-    uniq = np.unique(strata)
-    # >>> use lists (not arrays) <<<
-    buckets = {u: list(patients[strata == u]) for u in uniq}
-    for u in uniq:
-        rng.shuffle(buckets[u])
+    buckets = {stratum: list(patients[strata == stratum]) for stratum in unique_strata}
+    for stratum in unique_strata:
+        rng.shuffle(buckets[stratum])
 
-    # target sizes
-    n_pat = len(patients)
-    n_train = int(round(n_pat * train_ratio))
-    n_val = int(round(n_pat * val_ratio))
-    n_test = n_pat - n_train - n_val  # ensure exact sum
+    n_patients = len(patients)
+    n_train = int(round(n_patients * train_ratio))
+    n_val = int(round(n_patients * val_ratio))
+    n_test = n_patients - n_train - n_val
 
-    train_p, val_p, test_p = [], [], []
-    order = ["train", "val", "test"]
-    idx_order = 0
+    train_patients: list[str] = []
+    val_patients: list[str] = []
+    test_patients: list[str] = []
 
-    # round-robin assignment per stratum
-    def add_patient(dest, pid):
-        if dest == "train" and len(train_p) < n_train:
-            train_p.append(pid)
+    split_order = ["train", "val", "test"]
+    split_cursor = 0
+
+    def add_patient(split_name: str, patient_id: str) -> bool:
+        if split_name == "train" and len(train_patients) < n_train:
+            train_patients.append(patient_id)
             return True
-        if dest == "val" and len(val_p) < n_val:
-            val_p.append(pid)
+        if split_name == "val" and len(val_patients) < n_val:
+            val_patients.append(patient_id)
             return True
-        if dest == "test" and len(test_p) < n_test:
-            test_p.append(pid)
+        if split_name == "test" and len(test_patients) < n_test:
+            test_patients.append(patient_id)
             return True
         return False
 
-    while any(len(buckets[u]) > 0 for u in uniq):
-        for u in uniq:
-            if not buckets[u]:
+    while any(buckets[stratum] for stratum in unique_strata):
+        for stratum in unique_strata:
+            if not buckets[stratum]:
                 continue
-            pid = buckets[u].pop()
 
-            # try current destination; if full, try the others
+            patient_id = buckets[stratum].pop()
             placed = False
-            for k in range(3):
-                dest = order[(idx_order + k) % 3]
-                if add_patient(dest, pid):
+            for offset in range(3):
+                destination = split_order[(split_cursor + offset) % 3]
+                if add_patient(destination, patient_id):
                     placed = True
                     break
+
             if not placed:
-                # if all full due to rounding, put in train
-                train_p.append(pid)
+                train_patients.append(patient_id)
 
-            idx_order += 1
+            split_cursor += 1
 
-        if len(train_p) >= n_train and len(val_p) >= n_val and len(test_p) >= n_test:
+        if len(train_patients) >= n_train and len(val_patients) >= n_val and len(test_patients) >= n_test:
             break
 
-    # if there are still patients left, send them to train
-    for u in uniq:
-        while buckets[u]:
-            train_p.append(buckets[u].pop())
+    for stratum in unique_strata:
+        while buckets[stratum]:
+            train_patients.append(buckets[stratum].pop())
 
-    return set(train_p), set(val_p), set(test_p)
+    return set(train_patients), set(val_patients), set(test_patients)
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Create balanced splits by TZ/PZ volume.")
-    ap.add_argument(
-        "--tz_label", type=int, default=1, help="TZ label in the mask (default=1)."
-    )
-    ap.add_argument(
-        "--pz_label", type=int, default=2, help="PZ label in the mask (default=2)."
-    )
-    ap.add_argument("--train_ratio", type=float, default=0.70)
-    ap.add_argument("--val_ratio", type=float, default=0.15)
-    ap.add_argument("--test_ratio", type=float, default=0.15)
-    ap.add_argument("--random_state", type=int, default=42)
-    args = ap.parse_args()
 
-    csv_paths = ["./data/Prostate/all_cases.csv"]
-    out_dir = "."
+def build_volume_table(master_df: pd.DataFrame, csv_path: Path) -> pd.DataFrame:
+    """Compute per-case mask statistics from the master CSV."""
+    rows: list[dict[str, object]] = []
+    csv_dir = csv_path.parent
 
-    os.makedirs(out_dir, exist_ok=True)
+    for row in master_df.itertuples(index=False):
+        image_rel_path = row.images
+        label_rel_path = row.labels
+        label_abs_path = resolve_path(label_rel_path, csv_dir)
 
-    df = read_inputs(csv_paths)
-    # Compute per-row stats
-    rows = []
-    for i, r in df.iterrows():
-        img_p = r["images"]
-        msk_p = r["labels"]
         try:
-            mask, spacing = load_mask(msk_p)
-        except Exception as e:
-            warnings.warn(f"[WARN] Could not read mask: {msk_p} ({e})")
+            mask, spacing = load_mask(label_abs_path)
+        except Exception as exc:
+            warnings.warn(f"Could not read mask: {label_rel_path} ({exc})")
             continue
 
-        tz_vox, pz_vox, tz_mm3, pz_mm3, voxel_mm3 = compute_volumes(
-            mask, spacing, tz_label=args.tz_label, pz_label=args.pz_label
+        tz_voxels, pz_voxels, tz_volume_mm3, pz_volume_mm3, voxel_volume_mm3 = compute_volumes(
+            mask,
+            spacing,
+            tz_label=TZ_LABEL,
+            pz_label=PZ_LABEL,
         )
-        pid = infer_patient_id(msk_p)
+
         rows.append(
             {
-                "patient_id": pid,
-                "images": img_p,
-                "labels": msk_p,
-                "tz_vox": tz_vox,
-                "pz_vox": pz_vox,
-                "tz_mm3": tz_mm3,
-                "pz_mm3": pz_mm3,
-                "voxel_mm3": voxel_mm3,
+                "patient_id": infer_patient_id(label_rel_path),
+                "images": image_rel_path,
+                "labels": label_rel_path,
+                "tz_vox": tz_voxels,
+                "pz_vox": pz_voxels,
+                "tz_mm3": tz_volume_mm3,
+                "pz_mm3": pz_volume_mm3,
+                "voxel_mm3": voxel_volume_mm3,
             }
         )
 
     if not rows:
-        raise RuntimeError("No rows were generated. Are paths/formats correct?")
+        raise RuntimeError("No valid rows were generated. Check the CSV paths and mask files.")
 
-    stats = pd.DataFrame(rows)
-    stats.to_csv(os.path.join(out_dir, "mask_volumes.csv"), index=False)
+    return pd.DataFrame(rows)
 
-    # Balanced split by TZ/PZ volume bins and grouped by patient
-    train_p, val_p, test_p = balanced_group_split(
-        stats.copy(),
-        train_ratio=args.train_ratio,
-        val_ratio=args.val_ratio,
-        test_ratio=args.test_ratio,
-        random_state=args.random_state,
-    )
 
-    # Build new CSVs (same columns expected by your dataloaders)
-    train_df = stats[stats["patient_id"].isin(train_p)][["images", "labels"]].drop_duplicates().reset_index(drop=True)
-    val_df   = stats[stats["patient_id"].isin(val_p)][["images", "labels"]].drop_duplicates().reset_index(drop=True)
-    test_df  = stats[stats["patient_id"].isin(test_p)][["images", "labels"]].drop_duplicates().reset_index(drop=True)
 
-    # Save with index so that the first column is the row number (unnamed)
-    train_csv = os.path.join(out_dir, "train.csv")
-    val_csv   = os.path.join(out_dir, "validation.csv")
-    test_csv  = os.path.join(out_dir, "test.csv")
+def save_split_csv(split_df: pd.DataFrame, output_path: Path) -> None:
+    """Save a split CSV with the same format as the existing pipeline files."""
+    output_df = split_df[["images", "labels"]].drop_duplicates().reset_index(drop=True)
+    output_df.to_csv(output_path, index=True)
 
-    train_df.to_csv(train_csv, index=True)
-    val_df.to_csv(val_csv, index=True)
-    test_df.to_csv(test_csv, index=True)
 
-    # Summary
-    print(">>> Saved volume report to:", os.path.join(out_dir, "mask_volumes.csv"))
-    print(f">>> Split created in {out_dir}/")
-    print(f"    train.csv: {len(train_df)} rows, patients: {len(train_p)}")
-    print(f"    validation.csv: {len(val_df)} rows, patients: {len(val_p)}")
-    print(f"    test.csv: {len(test_df)} rows, patients: {len(test_p)}")
+
+def main() -> None:
+    """Run the full split generation pipeline with fixed settings."""
+    if not DATA_DIR.exists():
+        raise FileNotFoundError(f"Data directory not found: {DATA_DIR}")
+
+    master_df = read_master_csv(INPUT_CSV)
+    stats_df = build_volume_table(master_df, INPUT_CSV)
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    stats_df.to_csv(MASK_VOLUMES_CSV, index=False)
+
+    train_patients, val_patients, test_patients = balanced_group_split(stats_df)
+
+    train_df = stats_df[stats_df["patient_id"].isin(train_patients)]
+    val_df = stats_df[stats_df["patient_id"].isin(val_patients)]
+    test_df = stats_df[stats_df["patient_id"].isin(test_patients)]
+
+    save_split_csv(train_df, TRAIN_CSV)
+    save_split_csv(val_df, VALIDATION_CSV)
+    save_split_csv(test_df, TEST_CSV)
+
+    print(f"Saved volume report: {MASK_VOLUMES_CSV}")
+    print(f"Saved train split: {TRAIN_CSV} ({len(train_df)} rows, {len(train_patients)} patients)")
+    print(f"Saved validation split: {VALIDATION_CSV} ({len(val_df)} rows, {len(val_patients)} patients)")
+    print(f"Saved test split: {TEST_CSV} ({len(test_df)} rows, {len(test_patients)} patients)")
 
 
 if __name__ == "__main__":

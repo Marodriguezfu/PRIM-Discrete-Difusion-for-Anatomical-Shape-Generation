@@ -30,6 +30,7 @@ temp/
 tmp/
 *.tmp
 *.log
+Log_to_eps_png/
 
 # === System files ===
 .DS_Store
