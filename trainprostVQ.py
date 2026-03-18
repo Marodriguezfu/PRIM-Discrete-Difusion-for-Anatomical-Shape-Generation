@@ -914,7 +914,10 @@ if __name__ == "__main__":
     resume_mode = "highest_epoch"
     root_dir = "./data/Prostate/outputprostatefinal"
 
-    resume_ckpt = None
+    resume_ckpt = os.path.join(
+        root_dir,
+        "best_dice_epochepoch=49_diceval_dice=0.7975.ckpt"
+    )
     if resume_training and resume_mode == "highest_epoch":
         resume_ckpt = get_highest_epoch_ckpt(root_dir, patterns=["best_*.ckpt"])
         if resume_ckpt is None:
@@ -937,7 +940,7 @@ if __name__ == "__main__":
         w_d=0.8,
         w_hd=0.1,
         w_asd=0.1,
-        max_epochs=2,
+        max_epochs=50,
         check_val=1,
         output_root=root_dir,
     )

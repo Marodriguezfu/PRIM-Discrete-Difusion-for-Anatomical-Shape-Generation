@@ -1,290 +1,283 @@
-# Vector-Quantisation-for-Robust-Segmentation (Fork)
+# PRIM – Discrete Diffusion for Anatomical Shape Generation (Prostate Version)
 
-This repository is a **fork and extension** of the original work by **Ainkaran Santhirasekaram** and **Avinash Kori** on *Vector-Quantisation-for-Robust-Segmentation*.  
-It preserves the original training framework for VQ-UNet and VQ-TransUNet, and additionally includes:
+This repository contains the **final PRIM pipeline** used to learn a discrete anatomical shape model from **prostate segmentation masks**.
 
-- A complete **balanced split generator** based on TZ/PZ prostate volumes  
-- A fully pre-configured **conda environment** (`environment.yaml`)  
-- Updated training scripts and improved checkpoint naming  
-- Clear instructions for running prostate segmentation experiments
+The current implementation is centered on a **3D VQ tokenizer + discrete diffusion prior**:
+1. create balanced train / validation / test splits,
+2. train the tokenizer on prostate segmentation volumes,
+3. export discrete token grids,
+4. train a diffusion-style token prior,
+5. decode generated tokens back into segmentation masks.
 
----
-
-## ✨ Original Authors (Credit)
-
-This repository is based on the original work:
-
-**Ainkaran Santhirasekaram**  
-(a.santhirasekaram19@imperial.ac.uk)
-
-**Avinash Kori**  
-(a.kori21@imperial.ac.uk)
-
-Original repository: *Vector-Quantisation-for-Robust-Segmentation*
+This version is focused on **prostate anatomical shape generation**. The active code works on **segmentation masks**, not directly on raw MRI intensities.
 
 ---
 
-# 📘 Description
+## Recommended Way to Run the Project
 
-This project implements autoencoder-based segmentation models that integrate **Vector Quantisation (VQ) blocks** at the bottleneck.  
-The codebase includes models and training pipelines for:
+The recommended entry point is:
 
-- **VQ-UNet**  
-- **VQ-TransUNet**
+```text
+PRIM_pipeline.ipynb
+```
 
-Both architectures enable discrete representations that improve robustness and anatomical consistency.
+This notebook already executes the **full pipeline end-to-end**, so the project does **not need to be run stage by stage from the console** unless you explicitly want to do that.
+
+The notebook is designed to work in both settings:
+
+- **Google Colab**
+- **Local computer** (for example with Jupyter Notebook, JupyterLab, or VS Code)
+
+### In Google Colab
+
+The notebook automatically checks whether it is running in Colab. In that case it:
+
+- mounts Google Drive,
+- installs the required missing packages used in the notebook,
+- changes the working directory to the project folder.
+
+The current Colab setup in the notebook assumes the repository is located at:
+
+```text
+/content/drive/MyDrive/PRIM
+```
+
+If your repository is stored somewhere else in Drive, only that path cell needs to be adjusted.
+
+### On a local computer
+
+Open `PRIM_pipeline.ipynb` from the repository root and run the cells in order.
+
+For local execution, you only need:
+
+- the project dependencies installed in your Python environment,
+- the dataset available in the expected paths,
+- the notebook launched from the repository root so relative paths resolve correctly.
 
 ---
 
-# 🔧 Environment Setup
+## What the Notebook Executes
 
-You can create the complete environment (Python, PyTorch Lightning, MONAI, TorchIO, etc.) by running:
+`PRIM_pipeline.ipynb` is the practical orchestrator of the project. It runs the following stages:
+
+### Stage 0 — Balanced dataset split
+Runs `make_balanced_split_by_volume.py` to create:
+- `mask_volumes.csv`
+- `train.csv`
+- `validation.csv`
+- `test.csv`
+
+### Stage 1 — Train the VQ tokenizer
+Runs `trainprostVQ.py` to train the 3D tokenizer and save checkpoints, test outputs, and token files.
+
+### Stage 2 — Token extraction / token file preparation
+Uses the exported token tensors and makes sure they are saved in a clean integer format for the diffusion prior.
+
+### Stage 3 — Train the token prior
+Runs `train_token_prior.py` to train the discrete diffusion-style prior over token grids.
+
+### Stage 4 — Decode generated samples
+Runs `decode_samples.py` to reconstruct generated token grids into NIfTI segmentation volumes.
+
+### Additional notebook diagnostics
+The notebook also includes extra analysis cells for:
+- decoded-sample sanity checks,
+- reconstruction comparison against a real validation case,
+- token usage statistics,
+- label distribution checks,
+- diversity checks between generated samples,
+- nearest-training-token similarity checks.
+
+---
+
+## Optional Alternative: Run Each Script Manually
+
+Even though the notebook is the main workflow, the scripts still exist and can be executed separately when needed.
+
+Typical manual order:
 
 ```bash
-conda env create -f environment.yaml
-```
-
-Now run the environment:
-
-```bash
-conda activate vqrs_env
-```
-
-This installs all required libraries automatically.
-
-# 📂 Datasets
-
-You must prepare 3 CSV files:
-
-```
-train.csv  
-validation.csv  
-test.csv
-```
-
-Each must contain three columns:
-
-```
-item, images, labels
-```
-
-Pointing to ```.nii.gz``` or ```.png``` files.
-
-Example:
-
-```
-,images,labels
-0,/path/CaseXX.nii.gz,/path/CaseXX_Segmentation.nii.gz
-```
-
-# 🟦 Balanced Volume-Based Split
-
-**Script:** ```make_balanced_split_by_volume.py```
-
-This script creates **train/val/test** splits balanced by TZ and PZ volumes, removing center-specific biases (BCM vs RUNMC).
-
-▶️ Usage Example
-
-```
-python make_balanced_split_by_volume.py \
-  --tz_label 1 --pz_label 2 \
-  --train_ratio 0.70 --val_ratio 0.15 --test_ratio 0.15
-```
-
-**Explanation of arguments**
-
-- **```--tz_label``` / ```--pz_label```**: Class labels for TZ and PZ in the segmentation masks
-
-- **Ratios**: Train/Validation/Test proportions (here 70% / 15% / 15%)
-
-All generated CSVs will appear in the **repository root directory**, where the training script expects them.
-
-# 🚀 Training
-
-Once the CSVs are created, start training with:
-
-```
+python make_balanced_split_by_volume.py
 python trainprostVQ.py
+python tokens.py
+python train_token_prior.py
+python decode_samples.py
 ```
 
-The script automatically loads:
+This manual execution path is optional. The final project workflow is primarily intended to be run through `PRIM_pipeline.ipynb`.
 
-```
-./train.csv
-./validation.csv
-./test.csv
-```
+---
 
-# ⚙️ Training Arguments (Where to Modify)
+## Repository Components
 
-At the end of ```trainprostVQ.py```, the following block contains all the relevant hyperparameters:
+### `PRIM_pipeline.ipynb`
+Main end-to-end notebook. This is the **recommended execution interface** for the project, especially for reproducible runs in Colab or on a local machine.
 
-**🔹 Model hyperparameters**
+### `make_balanced_split_by_volume.py`
+Creates balanced train / validation / test splits from the prostate dataset using TZ / PZ mask volumes.
 
-```
-net = Net(
-    inputchannels=1,
-    num_classes=3,
-    channels=16,
-    dropout=0.0,
-    n_embed=1024,
-    embed_dim=256,
-    w_d = 0.8,
-    w_hd = 0.1,
-    w_asd = 0.1,
-    max_epochs=100,
-    check_val=5,
-    output_root=root_dir,
-)
-```
+### `trainprostVQ.py`
+Trains, validates, tests, and exports tokens for the 3D VQ tokenizer.
 
-You can modify:
+### `convnet3D_utils.py`
+Contains the core 3D tokenizer architecture used by `trainprostVQ.py`.
 
-- Image channels
-- Number of classes
-- Channels in the UNet
-- Dropout
-- VQ embedding size
-- Loss weighting
-- Number of training epochs
-- Validation frequency
+### `tokens.py`
+Loads exported token tensors and generates basic token statistics and plots. This file is mainly for **inspection and visualization**, not for core training.
 
-**🔹 Data loading**
+### `train_token_prior.py`
+Trains the discrete diffusion-style prior on token grids.
 
-```
-data = ProstateDataModule(
-    batch_size=1,
-    num_workers=4,
-    csv_train_img="./train.csv",
-    csv_val_img="./validation.csv",
-    csv_test_img="./test.csv",
-)
+### `token_diffusion.py`
+Contains the token corruption process, denoiser utilities, diffusion schedule, and sampling helpers.
+
+### `decode_samples.py`
+Decodes sampled token grids back into segmentation volumes.
+
+---
+
+## Current Modeling Choice
+
+The tokenizer is trained on **segmentation structure**, not on raw MR appearance.
+
+In practice, `trainprostVQ.py` converts the segmentation label into:
+- one-hot label channels,
+- optionally one extra boundary channel.
+
+So the model learns a discrete latent representation of **anatomical segmentation volumes**.
+
+---
+
+## Dataset Format
+
+The pipeline expects CSV files with the columns:
+
+```text
+images,labels
 ```
 
-**🔹 Checkpoints**
+Supported mask formats include:
 
-```
-checkpoint_dice = ModelCheckpoint(
-    dirpath=root_dir,
-    filename="best_dice_epoch{epoch:02d}_dice{val_dice:.4f}",
-    monitor="val_dice",
-    mode="max",
-    save_top_k=1,
-)
-```
+- `.nii`
+- `.nii.gz`
+- `.nrrd`
 
-Results are saved as:
+In the current tokenizer pipeline, the dataloader intentionally uses the **mask path for both `image` and `label`**, because the training target is the segmentation structure itself.
 
-```
-best_dice_epochXX_dice0.XXXX.ckpt
-best_multi_epochXX_multi0.XXXX.ckpt
-```
+---
 
-**🔹 Lightning Trainer**
+## Output Root Directory
 
-```
-trainer = pytorch_lightning.Trainer(
-    gpus=[0],
-    max_epochs=net.max_epochs,
-    check_val_every_n_epoch=net.check_val,
-    callbacks=[checkpoint_dice, checkpoint_multi],
-    default_root_dir=root_dir,
-)
-```
+The main output root used by the current code is:
 
-## 🖥️ Output Files and Medical Image Visualization
-
-All outputs are saved in:
-
-```
+```text
 ./data/Prostate/outputprostatefinal/
 ```
 
-For visualizing the different medical imaging files used in this project (e.g., `.nii.gz` prostate MRI volumes, predictions, and segmentations), we use **3D Slicer**, an open-source application for viewing and analyzing medical images.
+Important generated content includes:
 
-You can download it directly from:
+- Lightning logs,
+- tokenizer checkpoints,
+- tokenizer test outputs,
+- exported token tensors,
+- token plots,
+- diffusion checkpoints,
+- generated token samples,
+- decoded segmentation samples.
 
-🔗 **https://download.slicer.org/**
+---
 
-3D Slicer allows you to:
+## Important Output Files
 
-- Load and inspect NIfTI volumes (`.nii.gz`)
-- Visualize ground-truth and predicted segmentations
-- Compare anatomical structures in 2D/3D
-- Explore overlays and multi-view slice navigation
-
-It is the recommended tool for qualitative evaluation of the segmentation results generated by this repository.
-
-
-If you wish to inspect the data generated during training, validation, and testing, such as loss curves, Dice evolution, learning dynamics, or metric convergence, you can rely on the logging system integrated into this project. All logs and summaries are automatically saved and can be visualized using TensorBoard.
-
-
-**✔ TensorBoard logs**
-
-Run with:
-
+### Split files
+```text
+train.csv
+validation.csv
+test.csv
+mask_volumes.csv
 ```
+
+### Tokenizer outputs
+```text
+./data/Prostate/outputprostatefinal/best_dice_epoch*.ckpt
+./data/Prostate/outputprostatefinal/best_multi_epoch*.ckpt
+./data/Prostate/outputprostatefinal/tokens_train.pt
+./data/Prostate/outputprostatefinal/tokens_val.pt
+./data/Prostate/outputprostatefinal/tokens_test.pt
+```
+
+### Diffusion / prior outputs
+```text
+./data/Prostate/outputprostatefinal/token_prior_best.pt
+./data/Prostate/outputprostatefinal/token_prior_last.pt
+./data/Prostate/outputprostatefinal/samples_tokens_ep*.pt
+./data/Prostate/outputprostatefinal/samples_tokens_best.pt
+```
+
+### Decoded generated samples
+```text
+./data/Prostate/outputprostatefinal/decoded_samples/sample_0.nii.gz
+```
+
+---
+
+## Token Inspection
+
+`tokens.py` is not the main execution entry point of the project. It is only used to inspect already saved token files.
+
+It loads:
+- `tokens_train.pt`
+- `tokens_val.pt`
+- `tokens_test.pt`
+
+and saves visualization outputs under:
+
+```text
+./data/Prostate/outputprostatefinal/tokens_plots/
+```
+
+---
+
+## TensorBoard
+
+Tokenizer training logs are written inside the Lightning output directory. To inspect them with TensorBoard:
+
+```bash
 tensorboard --logdir ./data/Prostate/outputprostatefinal/lightning_logs
 ```
 
-## 📈 Log Conversion to EPS/PNG
+---
 
-In the folder `Log_to_eps_png/` you will find example `.json` files extracted from **TensorBoard logs**.  
+## Credit to the Original Repository
 
-These files contain metric histories (e.g., Dice, loss, HD, multi-metric score).
+This repository is adapted from the original work:
 
-The script `Logs_to_eps_png.py` allows you to generate **EPS** and **PNG** plots directly from these JSON logs.
+- **Ainkaran Santhirasekaram**
+- **Avinash Kori**
 
-## 📁 Previous Training Experiments
+Original repository: *Vector-Quantisation-for-Robust-Segmentation*
 
-The repository includes the folders:
+The PRIM version keeps the general idea of vector-quantized segmentation modeling, but the current repository has been adapted into a **prostate mask tokenizer + discrete diffusion generation pipeline** with a notebook-driven workflow.
 
-- `Test_50epochs_1validation`
-- `Test_100epochs_1validation`
-- `Test_100epochs_5validation`
+---
 
-These directories correspond to **previous training experiments** performed before the current setup:
+## Notes About the Current Final Version
 
-- **`Test_50epochs_1validation`**: Training run with **50 epochs** and **validation executed every epoch**.
+Compared with older repository descriptions, the current final version should be understood as follows:
 
-- **`Test_100epochs_1validation`**: Training run with **100 epochs** and **validation executed every epoch**.
+- the main practical entry point is **`PRIM_pipeline.ipynb`**,
+- the full workflow can be run from **Colab or a local computer**,
+- manual console execution is **optional**, not the primary interface,
+- the split generator is a fixed script without CLI arguments,
+- tokenizer training is performed on segmentation masks encoded as one-hot channels plus an optional boundary channel,
+- token export is part of the tokenizer workflow,
+- the diffusion stage is separated into `train_token_prior.py` and `token_diffusion.py`,
+- generated samples are decoded by `decode_samples.py`.
 
-- **`Test_100epochs_5validation`**: Training run with **100 epochs** but **validation executed every 5 epochs**.
+---
 
-Each folder contains the associated logs, model checkpoints, and evaluation outputs for those experiments.  
+## References
 
-These results are kept for comparison and reproducibility across different training setups.
-
-
-
-# 🧑‍💻 Full Execution Workflow
-
-```
-conda env create -f environment.yaml
-
-conda activate vqrs_env
-
-python make_balanced_split_by_volume.py \
-  --tz_label 1 --pz_label 2 \
-  --train_ratio 0.70 --val_ratio 0.15 --test_ratio 0.15
-
-python trainprostVQ.py
-
-tensorboard --logdir ./data/Prostate/outputprostatefinal/
-```
-
-# 📚 References
-
-1. B Nicolas Bloch, Ashali Jain, and C. Carl Jae. Data From  ROSTATE-DIAGNOSIS. 2015. doi: 10.7937/ K9 / TCIA . 2015 . FOQEUJVT. url: https://www.cancerimagingarchive.net/collection/prostate-diagnosis/.
-
-2. Geert Litjens, Jurgen Futterer, and Henkjan Huisman. Data From Prostate-3T. 2015. doi: 10.7937/K9/TCIA.2015.QJTV5IL5. url: https://www.cancerimagingarchive.net/collection/prostate-3t/.
-
-3.  Aäron van den Oord, Oriol Vinyals, and Koray Kavukcuoglu. Neural Discrete Representation Learning. In: CoRR abs/1711.00937 (2017). arXiv: 1711.00937. url: http://arxiv.org/abs/1711.00937.
-
-4. Minghui Hu et al. Global Context with Discrete Diffusion in Vector Quantised Modelling for Image Generation. In: CoRR abs/2112.01799 (2021). arXiv: 2112.01799. url: https://arxiv.org/abs/2112.01799.
-
-5. AinkaranSanthi. Vector-Quantisation-for-Robust-Segmentation. https://github.com/AinkaranSanthi/Vector-Quantisation-for-Robust-Segmentation. June 2022.
-
-6. Slicer Wiki. [Online; accessed 17-November-2025]. 2019. url: https://www.slicer.org/w/index.php?title=Main_Page&oldid=62645%7D.
-
-7. B. Nicholas Bloch et al. NCI-ISBI 2013 Challenge: Automated Segmentation of Prostate Structures (ISBI-MR-Prostate-2013). 2015. doi: 10.7937/K9/TCIA.2015.ZF0VLOPV. url: https://www.cancerimagingarchive.net/analysis-result/isbi-mr-prostate-2013/
+1. Aaron van den Oord, Oriol Vinyals, and Koray Kavukcuoglu. *Neural Discrete Representation Learning*. NeurIPS, 2017.
+2. Minghui Hu et al. *Global Context with Discrete Diffusion in Vector Quantised Modelling for Image Generation*. CVPR, 2022.
+3. The repository is adapted from the original *Vector-Quantisation-for-Robust-Segmentation* codebase.

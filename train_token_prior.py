@@ -159,7 +159,7 @@ def main() -> None:
 
     batch_size = 8
     learning_rate = 2e-4
-    epochs = 200
+    epochs = 30
     patience = 10
     min_delta = 1e-4
     num_workers = 2
